@@ -1,0 +1,37 @@
+{
+  // Disable GitHub Copilot
+  "github.copilot.enable": {
+    "*": false
+  },
+  // Use C++ folding provider
+  "editor.defaultFoldingRangeProvider": "ms-vscode.cpptools",
+  // Global formatter settings
+  "editor.formatOnSave": true,
+  "editor.formatOnPaste": true,
+  // C/C++ formatting using clang-format
+  "[c]": {
+    "editor.defaultFormatter": "ms-vscode.cpptools"
+  },
+  "[cpp]": {
+    "editor.defaultFormatter": "ms-vscode.cpptools"
+  },
+  // Optional: clang-format style settings (you can also use a .clang-format file instead)
+  "C_Cpp.clang_format_style": "Google",
+  "[typescript]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
+  },
+  "[javascript]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
+  },
+  "[html]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
+  },
+  "[json]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
+  },
+  "[css]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
+  },
+  "notebook.defaultFormatter": "ms-vscode.cpptools",
+  "editor.defaultFormatter": "ms-vscode.cpptools"
+}

@@ -1,6 +1,6 @@
 CC = gcc
 CFLAGS = -Wall -g
-SRC =udp_server_2.c
+SRC =tftp_server.c
 OUT = build/app
 
 all: build $(OUT)
