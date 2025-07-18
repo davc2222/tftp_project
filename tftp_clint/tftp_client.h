@@ -27,7 +27,7 @@
  /*!
   * \brief Compute CRC-8 over a data buffer.
   */
- uint8_t crc8(const uint8_t *data, size_t len);
+ uint8_t calculate_crc8(const uint8_t *data, size_t len);
  
  /*!
   * \brief Ping the TFTP server to verify connectivity.
@@ -42,8 +42,8 @@
  /*!
   * \brief Read a file from the server (RRQ).
   */
- void rrq(int sock, struct sockaddr_in *server_addr, socklen_t addr_len, const char *filename);
  
+ void rrq(int sock, struct sockaddr_in *server_addr, const char *filename);
  /*!
   * \brief Write a file to the server (WRQ).
   */

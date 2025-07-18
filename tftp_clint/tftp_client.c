@@ -28,7 +28,7 @@
   * @param len Number of bytes in the input buffer.
   * @return CRC-8 checksum result.
   */
- uint8_t crc8(const uint8_t *data, size_t len) {
+ uint8_t calculate_crc8(const uint8_t *data, size_t len) {
      uint8_t crc = 0;
      for (size_t i = 0; i < len; ++i) {
          crc ^= data[i];
@@ -89,107 +89,102 @@
      sendto(sock, buf, len, 0, (struct sockaddr *)server_addr, addr_len);
  }
  
- /**
-  * @brief Perform a TFTP RRQ (download) from the server.
-  *
-  * @param sock UDP socket.
-  * @param server_addr Server address structure.
-  * @param addr_len Length of the server address.
-  * @param filename Name of the remote file to download.
-  */
- void rrq(int sock, struct sockaddr_in *server_addr, socklen_t addr_len, const char *filename) {
-     unsigned char buf[MAX_PACKET_SIZE];
-     unsigned char ack[4];
-     // open file to write  data
-     FILE *fp = fopen(filename, "wb");
-     if (!fp) {
-         perror("Cannot open local file");
-         return;
-     }
- 
-     // Construct RRQ packet
-     int rrq_len = 2 + strlen(filename) + 1;
-     buf[0] = 0;
-     buf[1] = OP_RRQ;
-     strcpy((char *)&buf[2], filename);
-     sendto(sock, buf, rrq_len, 0, (struct sockaddr *)server_addr, addr_len);
- 
-     int expected_block = 1;
-     struct sockaddr_in from_addr;
-     socklen_t from_len = sizeof(from_addr);
- 
-     // Set 3-second timeout for receiving
-     struct timeval timeout = {3, 0};
-     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
- 
-     while (1) {
+/**
+ * @brief Download a file from the server using RRQ (Read Request).
+ *        Handles retransmissions and CRC-8 validation.
+ *
+ * @param sock The UDP socket to use
+ * @param server_addr Pointer to the server address struct
+ * @param filename The name of the file to download
+ */
+void rrq(int sock, struct sockaddr_in *server_addr, const char *filename) {
+    FILE *fp = fopen(filename, "wb");
+    if (!fp) {
+        perror("fopen");
+        return;
+    }
 
-        // check for incomming msgs and handle according
-        // to opcode
-         int n = recvfrom(sock, buf, sizeof(buf), 0, (struct sockaddr *)&from_addr, &from_len);
-         if (n < 0) {
-             printf("Timeout or error receiving data\n");
-             break;
-         }
-          //    case server error
-         if (buf[1] == OP_ERROR) {
-             printf("Server error: %s\n", &buf[4]);
-             break;
-         }
-            // no data packet
-         if (buf[1] != OP_DATA) {
-             printf("Unexpected packet opcode %d\n", buf[1]);
-             continue;
-         }
-           // get vlocks num from buffer
-         int block = (buf[2] << 8) | buf[3];
-           // get crc from buffer
-         uint8_t received_crc = buf[n - 1];
-         // calc crc on data only , skip header(4) and substrct the crc 
-         // byte .
-         uint8_t calc_crc = crc8(&buf[4], n - 5);
-          // check if recived crc  value = cal crc
-         if (received_crc != calc_crc) {
-             printf("CRC mismatch on block %d\n", block);
-             continue;
-         }
-              // check if it's the desired block
-         if (block == expected_block) {
-             // Write received data to file
-             fwrite(&buf[4], 1, n - 5, fp);
-             expected_block++;
-         } else {
-             // ACK the previous block again if a duplicate or out-of-order packet arrives
-             int ack_block = expected_block - 1;
-             ack[0] = 0; ack[1] = OP_ACK;
-             ack[2] = (ack_block >> 8) & 0xFF;
-             ack[3] = ack_block & 0xFF;
-             // send ACK to last block
-             sendto(sock, ack, 4, 0, (struct sockaddr *)&from_addr, from_len);
-             continue;
-         }
- 
-         // Send ACK for the current block
-         ack[0] = 0;
-         ack[1] = OP_ACK;
-         ack[2] = buf[2];
-         ack[3] = buf[3];
-         sendto(sock, ack, 4, 0, (struct sockaddr *)&from_addr, from_len);
-      /**
-         If less than 512 bytes received, this is the last block
-         if the last block was 512 bytes the
-         server will send 0 data msg
-         so client according to statment know it
-         was the last block that been received
-     */
-         if (n - 5 < MAX_DATA_SIZE) {
-             printf("Download complete\n");
-             break;
-         }
-     }
- 
-     fclose(fp);
- }
+    // Build and send RRQ packet
+    unsigned char rrq_packet[516];
+    int rrq_len = 2 + strlen(filename) + 1;
+    rrq_packet[0] = 0;
+    rrq_packet[1] = OP_RRQ;
+    strcpy((char *)&rrq_packet[2], filename);
+    sendto(sock, rrq_packet, rrq_len, 0, (struct sockaddr *)server_addr, sizeof(*server_addr));
+
+    uint16_t expected_block = 1;
+    struct sockaddr_in from_addr;
+    socklen_t from_len = sizeof(from_addr);
+    unsigned char buf[MAX_PACKET_SIZE];
+
+    while (1) {
+        int n = recvfrom(sock, buf, sizeof(buf), 0, (struct sockaddr *)&from_addr, &from_len);
+        if (n < 5) {
+            printf("Invalid packet\n");
+            break;
+        }
+
+        uint8_t opcode = buf[1];
+        uint16_t block = (buf[2] << 8) | buf[3];
+        uint8_t crc_received = buf[n - 1];
+
+        // Calculate CRC over opcode + block + data
+ uint8_t crc_calc =calculate_crc8(&buf[4], n - 5);
+
+        if (crc_calc != crc_received) {
+            printf("CRC mismatch on block %d (expected %02X, got %02X)\n", block, crc_calc, crc_received);
+            continue; // wait for retransmit
+        }
+
+        if (opcode == OP_DATA && block == expected_block) {
+            int data_len = n - 4 - 1;  // total - header (2+2) - CRC
+            if (data_len > 0) {
+                fwrite(&buf[4], 1, data_len, fp);
+            }
+
+            // Send ACK for received block
+            unsigned char ack[4];
+            ack[0] = 0;
+            ack[1] = OP_ACK;
+            ack[2] = buf[2];
+            ack[3] = buf[3];
+            sendto(sock, ack, sizeof(ack), 0, (struct sockaddr *)&from_addr, from_len);
+
+            expected_block++;
+
+            //  Case 1: Normal end — data block is less than 512 bytes
+            if (data_len < MAX_DATA_SIZE) {
+                printf("Download complete\n");
+                break;
+            }
+
+        } else if (opcode == OP_DATA && block == expected_block && (n == 5)) {
+            // Case 2: Empty data block (0 bytes of data)
+            // This is sent *only* after a final 512-byte block to signal end of file.
+            printf("Received final empty block (block %d)\n", block);
+
+            // Send ACK for empty block
+            unsigned char ack[4];
+            ack[0] = 0;
+            ack[1] = OP_ACK;
+            ack[2] = buf[2];
+            ack[3] = buf[3];
+            sendto(sock, ack, sizeof(ack), 0, (struct sockaddr *)&from_addr, from_len);
+
+            printf("Download complete\n");
+            break;
+
+        } else if (opcode == OP_ERROR) {
+            printf("Server error: %s\n", &buf[4]);
+            break;
+        } else {
+            printf("Unexpected packet (opcode: %d, block: %d)\n", opcode, block);
+        }
+    }
+
+    fclose(fp);
+}
+
  
  /**
   * @brief Perform a TFTP WRQ (upload) to the server.
@@ -200,102 +195,136 @@
   * @param local_file Path to local file to send.
   * @param remote_file Destination filename on the server.
   */
- void wrq(int sock, struct sockaddr_in *server_addr, socklen_t addr_len, const char *local_file, const char *remote_file) {
+ /**
+ * @brief Perform a TFTP WRQ (upload) to the server.
+ *
+ * This function uploads a local file to a TFTP server using the Write Request (WRQ) procedure.
+ * It handles retries, acknowledgments, and special case of sending a final empty DATA block
+ * if the file size is an exact multiple of 512 bytes.
+ *
+ * @param sock UDP socket used for communication.
+ * @param server_addr Pointer to the server's sockaddr_in structure.
+ * @param addr_len Length of the server address structure.
+ * @param local_file Path to the local file to be uploaded.
+ * @param remote_file Target filename on the server.
+ */
+void wrq(int sock, struct sockaddr_in *server_addr, socklen_t addr_len, const char *local_file, const char *remote_file) {
+    unsigned char buf[MAX_PACKET_SIZE];
+    unsigned char ack[4];
 
-     unsigned char buf[MAX_PACKET_SIZE];
-     unsigned char ack[4];
-       // open file to upload to server
-     FILE *fp = fopen(local_file, "rb");
-     if (!fp) {
-         perror("Cannot open local file");
-         return;
-     }
- 
-     // Check file size limit
-     fseek(fp, 0, SEEK_END);
-     long filesize = ftell(fp);
-     rewind(fp);
-     if (filesize > 512 * 65535) {
-         printf("File too large for TFTP\n");
-         fclose(fp);
-         return;
-     }
- 
-     // Send WRQ request
-     int wrq_len = 2 + strlen(remote_file) + 1;
-     buf[0] = 0;
-     buf[1] = OP_WRQ;
-     strcpy((char *)&buf[2], remote_file);
-     sendto(sock, buf, wrq_len, 0, (struct sockaddr *)server_addr, addr_len);
-       // to support dynamic port
-     struct sockaddr_in from_addr;
-     socklen_t from_len = sizeof(from_addr);
-     // set timeout
-     struct timeval timeout = {3, 0};
-     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
- 
-     // Expect ACK(0) from server
-     int n = recvfrom(sock, buf, sizeof(buf), 0, (struct sockaddr *)&from_addr, &from_len);
-     if (n < 4 || buf[1] != OP_ACK || buf[2] != 0 || buf[3] != 0) {
-         printf("Did not receive ACK for WRQ\n");
-         fclose(fp);
-         return;
-     }
- 
-     int block = 1;
-     while (1) {
-         size_t bytes_read = fread(&buf[4], 1, MAX_DATA_SIZE, fp);
-         buf[0] = 0;
-         buf[1] = OP_DATA;
-          // set block num
-         buf[2] = (block >> 8) & 0xFF;
-         buf[3] = block & 0xFF;
-         // calc CRC
-         buf[bytes_read + 4] = crc8(&buf[4], bytes_read);
- 
-         int retries = 3;
-         while (retries-- > 0) {
-            // send the data
-             sendto(sock, buf, bytes_read + 5, 0, (struct sockaddr *)&from_addr, from_len);
-             // wait for acknonledg 
-             n = recvfrom(sock, ack, sizeof(ack), 0, (struct sockaddr *)&from_addr, &from_len);
-             if (n >= 4 && ack[1] == OP_ACK && ack[2] == buf[2] && ack[3] == buf[3])
-                 break;
-         }
- 
-         if (retries < 0) {
-             printf("Timeout waiting for ACK for block %d\n", block);
-             break;
-         }
- 
-         if (bytes_read < MAX_DATA_SIZE) {
-             printf("Upload complete\n");
- 
-             // Final 0-byte DATA block if file ends exactly on 512 bytes
-             if (bytes_read == MAX_DATA_SIZE) {
-                 block++;
-                 buf[0] = 0;
-                 buf[1] = OP_DATA;
-                 buf[2] = (block >> 8) & 0xFF;
-                 buf[3] = block & 0xFF;
-                 buf[4] = crc8(NULL, 0);
- 
-                 retries = 3;
-                 while (retries-- > 0) {
-                     sendto(sock, buf, 5, 0, (struct sockaddr *)&from_addr, &from_len);
-                     n = recvfrom(sock, ack, sizeof(ack), 0, (struct sockaddr *)&from_addr, &from_len);
-                     if (n >= 4 && ack[1] == OP_ACK && ack[2] == buf[2] && ack[3] == buf[3])
-                         break;
-                 }
-             }
-             break;
-         }
- 
-         block++;
-     }
- 
-     fclose(fp);
- }
+    // Open the local file for reading in binary mode
+    FILE *fp = fopen(local_file, "rb");
+    if (!fp) {
+        perror("Cannot open local file");
+        return;
+    }
+
+    // Check if file size is within TFTP limits (max 65535 blocks * 512 bytes)
+    fseek(fp, 0, SEEK_END);
+    long filesize = ftell(fp);
+    rewind(fp);
+    if (filesize > 512 * 65535) {
+        printf("File too large for TFTP\n");
+        fclose(fp);
+        return;
+    }
+
+    // Prepare and send the WRQ (Write Request) packet with the remote filename
+    int wrq_len = 2 + strlen(remote_file) + 1; // Opcode(2) + filename + null terminator
+    buf[0] = 0;
+    buf[1] = OP_WRQ;  // WRQ opcode
+    strcpy((char *)&buf[2], remote_file);
+    sendto(sock, buf, wrq_len, 0, (struct sockaddr *)server_addr, addr_len);
+
+    struct sockaddr_in from_addr;
+    socklen_t from_len = sizeof(from_addr);
+
+    // Set socket receive timeout (3 seconds)
+    struct timeval timeout = {3, 0};
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+    // Wait for ACK(0) from the server acknowledging the WRQ
+    int n = recvfrom(sock, buf, sizeof(buf), 0, (struct sockaddr *)&from_addr, &from_len);
+    if (n < 4 || buf[1] != OP_ACK || buf[2] != 0 || buf[3] != 0) {
+        printf("Did not receive ACK for WRQ\n");
+        fclose(fp);
+        return;
+    }
+
+    int block = 1;  // Start block numbering from 1
+
+    while (1) {
+        // Read up to MAX_DATA_SIZE bytes from file into buffer starting at buf[4]
+        size_t bytes_read = fread(&buf[4], 1, MAX_DATA_SIZE, fp);
+
+        // Construct DATA packet header
+        buf[0] = 0;
+        buf[1] = OP_DATA;  // DATA opcode
+        buf[2] = (block >> 8) & 0xFF;  // High byte of block number
+        buf[3] = block & 0xFF;         // Low byte of block number
+
+        // Calculate CRC8 over the data portion and store it immediately after data
+        buf[bytes_read + 4] = calculate_crc8(&buf[4], bytes_read);
+
+        // Retry logic: try up to 3 times to send DATA and receive correct ACK
+        int retries = 3;
+        while (retries-- > 0) {
+            sendto(sock, buf, bytes_read + 5, 0, (struct sockaddr *)&from_addr, from_len);
+            n = recvfrom(sock, ack, sizeof(ack), 0, (struct sockaddr *)&from_addr, &from_len);
+            if (n >= 4 && ack[1] == OP_ACK && ack[2] == buf[2] && ack[3] == buf[3]) {
+                // Correct ACK received for current block
+                break;
+            }
+        }
+
+        if (retries < 0) {
+            // Timeout waiting for ACK, abort upload
+            printf("Timeout waiting for ACK for block %d\n", block);
+            break;
+        }
+
+        block++;  // Increment block number for next DATA packet
+
+        if (bytes_read < MAX_DATA_SIZE) {
+            // File read less than 512 bytes → this is the final DATA block, upload complete
+            printf("Upload complete\n");
+            break;
+        }
+
+        // If bytes_read == MAX_DATA_SIZE (512), we might be at file boundary.
+        // Check if EOF has been reached by attempting to read one more byte.
+        int next_byte = fgetc(fp);
+        if (next_byte == EOF) {
+            // File ends exactly at 512-byte boundary → send final zero-length DATA block
+
+            // Prepare zero-length DATA block with incremented block number
+            buf[0] = 0;
+            buf[1] = OP_DATA;
+            buf[2] = (block >> 8) & 0xFF;
+            buf[3] = block & 0xFF;
+            buf[4] =calculate_crc8(NULL, 0);  // CRC for empty data
+
+            retries = 3;
+            while (retries-- > 0) {
+                sendto(sock, buf, 5, 0, (struct sockaddr *)&from_addr, from_len);
+                n = recvfrom(sock, ack, sizeof(ack), 0, (struct sockaddr *)&from_addr, &from_len);
+                if (n >= 4 && ack[1] == OP_ACK && ack[2] == buf[2] && ack[3] == buf[3]) {
+                    // ACK received for zero-length block
+                    break;
+                }
+            }
+            printf("Upload complete\n");
+            break;
+        } else {
+            // Not EOF, so push the byte back for next fread() call
+
+            ungetc(next_byte, fp);
+        }
+    }
+
+    fclose(fp);
+}
+
  
  /**
   * @brief Send a DELETE request to the server for a specific file.
@@ -402,7 +431,7 @@
                  printf("Enter filename to download: ");
                  if (!fgets(filename, sizeof(filename), stdin)) continue;
                  filename[strcspn(filename, "\r\n")] = 0;
-                 rrq(sock, &server_addr, sizeof(server_addr), filename);
+                 rrq(sock, &server_addr,  filename);
                  break;
              case 2:
                  printf("Enter filename to upload: ");

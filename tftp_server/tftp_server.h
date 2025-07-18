@@ -27,7 +27,7 @@
   * @param len Length of the data.
   * @return The computed CRC-8 value.
   */
- uint8_t crc8(const uint8_t *data, size_t len);
+ uint8_t calculate_crc8(const uint8_t *data, size_t len);
  
  /**
   * @brief Sends an error message to the client.
